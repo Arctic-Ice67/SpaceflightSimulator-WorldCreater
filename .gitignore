@@ -1,0 +1,15 @@
+# 构建产物
+PlanetEditor/bin/
+PlanetEditor/obj/
+PlanetEditorUI/build/
+PlanetEditorUI/Exports/
+
+# IDE
+.vs/
+*.user
+*.suo
+
+# 工作区里与本仓库无关的东西
+ViewControl/
+_internal/
+*.zip
