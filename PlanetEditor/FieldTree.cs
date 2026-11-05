@@ -92,15 +92,22 @@ namespace PlanetEditor
     /// <summary>把 PlanetData 整棵树摊平成可编辑字段列表。</summary>
     internal static class FieldTree
     {
+        /// <summary>数组展开上限，避免超大数组把界面卡死。</summary>
+        public const int MaxArrayItems = 512;
+        public const int MaxObjectArrayItems = 64;
+        public const int MaxDepth = 8;
+
         private static List<FieldEntry> _cache;
         private static Planet _cacheFor;
         private static readonly HashSet<object> Visited = new HashSet<object>();
+        private static int _truncated;
 
         public static List<FieldEntry> For(Planet planet)
         {
             if (_cache != null && _cacheFor == planet) return _cache;
             var list = new List<FieldEntry>();
             Visited.Clear();
+            _truncated = 0;
             try
             {
                 PlanetData d = planet.data;
@@ -113,15 +120,41 @@ namespace PlanetEditor
                 Walk(list, d.frontClouds, "clouds", 0);
                 Walk(list, d.postProcessing, "post", 0);
                 Walk(list, d.orbit, "orbit", 0);
+                WalkLandmarks(list, d.landmarks);
             }
             catch (Exception e)
             {
                 Log.Error("build field tree: " + e);
             }
-            Log.Info("field tree for " + planet.codeName + ": " + list.Count + " entries");
+            Log.Info("field tree for " + planet.codeName + ": " + list.Count + " entries"
+                + (_truncated > 0 ? (" (truncated " + _truncated + ")") : ""));
             AddTerrainFormulas(list, planet.data);
             _cache = list;
             _cacheFor = planet;
+            return list;
+        }
+
+        /// <summary>把地图地标也摊平，界面上就能改名字和角度。</summary>
+        private static void WalkLandmarks(List<FieldEntry> list, System.Collections.IList landmarks)
+        {
+            if (landmarks == null) return;
+            for (int i = 0; i < landmarks.Count; i++)
+            {
+                object el = landmarks[i];
+                if (el == null) continue;
+                Walk(list, el, "landmarks[" + i + "]", 1);
+            }
+        }
+
+        /// <summary>按前缀过滤字段，给界面做分组显示用。</summary>
+        public static List<FieldEntry> Filter(List<FieldEntry> all, string prefix)
+        {
+            if (string.IsNullOrEmpty(prefix)) return all;
+            var list = new List<FieldEntry>();
+            for (int i = 0; i < all.Count; i++)
+            {
+                if (all[i].Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) list.Add(all[i]);
+            }
             return list;
         }
 
@@ -133,7 +166,7 @@ namespace PlanetEditor
 
         private static void Walk(List<FieldEntry> list, object holder, string prefix, int depth)
         {
-            if (holder == null || depth > 5) return;
+            if (holder == null || depth > MaxDepth) return;
             if (!holder.GetType().IsValueType)
             {
                 if (!Visited.Add(holder)) return;
@@ -185,7 +218,8 @@ namespace PlanetEditor
                     {
                         var arr = f.GetValue(holder) as Array;
                         if (arr == null) continue;
-                        int n = Math.Min(arr.Length, 48);
+                        int n = Math.Min(arr.Length, MaxArrayItems);
+                        if (arr.Length > n) _truncated += arr.Length - n;
                         for (int i = 0; i < n; i++)
                         {
                             int idx = i;
@@ -208,7 +242,8 @@ namespace PlanetEditor
                         // 逐个元素展开成普通字段行，改的是数组里的同一个实例
                         var arr = f.GetValue(holder) as Array;
                         if (arr == null) continue;
-                        int n = Math.Min(arr.Length, 12);
+                        int n = Math.Min(arr.Length, MaxObjectArrayItems);
+                        if (arr.Length > n) _truncated += arr.Length - n;
                         for (int i = 0; i < n; i++)
                         {
                             object el = arr.GetValue(i);
@@ -224,7 +259,8 @@ namespace PlanetEditor
                     {
                         var lst = f.GetValue(holder) as System.Collections.IList;
                         if (lst == null) continue;
-                        int n = Math.Min(lst.Count, 12);
+                        int n = Math.Min(lst.Count, MaxObjectArrayItems);
+                        if (lst.Count > n) _truncated += lst.Count - n;
                         for (int i = 0; i < n; i++)
                         {
                             object el = lst[i];

@@ -1,5 +1,6 @@
 using HarmonyLib;
 using SFS.World;
+using SFS.World.Maps;
 
 namespace PlanetEditor
 {
@@ -57,5 +58,6 @@ namespace PlanetEditor
                 catch { }
             }
         }
+
     }
 }

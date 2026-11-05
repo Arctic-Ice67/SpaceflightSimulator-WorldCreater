@@ -402,23 +402,11 @@ namespace PlanetEditor
             if (!IsOpen) return;
 
             if (Input.GetKeyDown(KeyCode.Tab)) { ToggleCollapsed(); return; }
-            if (Input.GetKeyDown(KeyCode.F7)) { EditSession.ApplyNow(true); return; }
-            if (Input.GetKeyDown(KeyCode.F10)) { EditSession.ReloadFromFile(); return; }
 
             if (TerrainBrush.Enabled && (Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl)) && Input.GetKeyDown(KeyCode.Z))
             {
                 bool ok = TerrainBrush.Undo(EditSession.Target);
                 SetStatus(ok ? "undo terrain stroke (" + TerrainBrush.UndoCount + " left)" : "nothing to undo");
-                return;
-            }
-
-            if (Input.GetKeyDown(KeyCode.P))
-            {
-                TerrainBrush.Enabled = !TerrainBrush.Enabled;
-                if (TerrainBrush.Enabled) TerrainBrush.Ensure(EditSession.Target);
-                SetStatus(TerrainBrush.Enabled
-                    ? "PAINT ON  LMB=raise RMB=lower  Ctrl+wheel=brush " + (int)TerrainBrush.RadiusMeters + "m"
-                    : "PAINT OFF");
                 return;
             }
             if (TerrainBrush.Enabled && (Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl)))

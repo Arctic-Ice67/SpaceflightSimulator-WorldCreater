@@ -800,6 +800,9 @@ namespace PlanetEditor
 
                         Ui.Rebuild();
                         List<FieldEntry> entries = FieldTree.For(p);
+                        /* FIELDS 星球 前缀：带前缀时只回该分组的字段，界面上可以做分组显示 */
+                        string prefix = parts.Length > 2 ? parts[2].Trim() : "";
+                        if (prefix.Length > 0) entries = FieldTree.Filter(entries, prefix);
 
                         var lines = new List<string>(entries.Count);
 
@@ -990,15 +993,23 @@ namespace PlanetEditor
 
                             case "paint":
 
-                                TerrainBrush.Enabled = !TerrainBrush.Enabled;
-
-                                if (TerrainBrush.Enabled) TerrainBrush.Ensure(EditSession.Target);
-
-                                Send(c, "OK paint=" + (TerrainBrush.Enabled ? 1 : 0));
-
-                                return;
+                                {
+                                    // CMD paint [on|off]  —— 不给参数就是取反
+                                    string arg = parts.Length > 2 ? parts[2].Trim().ToLowerInvariant() : "";
+                                    string[] words = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                                    string pv = words.Length > 0 ? words[0] : "";
+                                    bool on = pv == "on" || pv == "1" || pv == "true";
+                                    bool off = pv == "off" || pv == "0" || pv == "false";
+                                    if (on || off) TerrainBrush.Enabled = on;
+                                    else TerrainBrush.Enabled = !TerrainBrush.Enabled;
+                                    if (TerrainBrush.Enabled) TerrainBrush.Ensure(EditSession.Target);
+                                    Log.Info("paint " + (TerrainBrush.Enabled ? "on" : "off"));
+                                    Send(c, "OK paint=" + (TerrainBrush.Enabled ? 1 : 0));
+                                    return;
+                                }
 
                             case "focus":
+
                                 {
                                     if (parts.Length < 3) { Send(c, "ERR usage: CMD focus <planet>"); return; }
 
@@ -1012,6 +1023,49 @@ namespace PlanetEditor
 
                                     return;
 
+                                }
+                            case "dellandmark":
+                                {
+                                    // CMD dellandmark <index> —— 删掉当前星球的一个地标
+                                    Planet dp = EditSession.Target;
+                                    if (dp == null || dp.data == null || dp.data.landmarks == null) { Send(c, "ERR no planet"); return; }
+
+                                    int idx;
+                                    if (parts.Length < 3 || !int.TryParse(parts[2].Trim(), out idx)) { Send(c, "ERR usage: CMD dellandmark <index>"); return; }
+                                    if (idx < 0 || idx >= dp.data.landmarks.Count) { Send(c, "ERR index out of range"); return; }
+
+                                    string gone = dp.data.landmarks[idx] != null ? dp.data.landmarks[idx].name : "";
+                                    dp.data.landmarks.RemoveAt(idx);
+                                    RebuildLandmarks(dp);
+                                    // 地标数量变了，字段表（landmarks[i].*）必须重扫，否则 FIELDS 还回旧列表
+                                    FieldTree.Invalidate();
+                                    Ui.Rebuild();
+                                    EditSession.MarkDirty();
+                                    Log.Info("delete landmark " + idx + " (" + gone + ") -> " + dp.data.landmarks.Count);
+                                    Send(c, "OK dellandmark " + idx + " count=" + dp.data.landmarks.Count);
+                                    return;
+                                }
+                            case "addlandmark":
+                                {
+                                    // CMD addlandmark —— 在当前星球末尾加一个地标
+                                    Planet ap = EditSession.Target;
+                                    if (ap == null || ap.data == null) { Send(c, "ERR no planet"); return; }
+
+                                    if (ap.data.landmarks == null) ap.data.landmarks = new List<LandmarkData>();
+                                    int n = ap.data.landmarks.Count;
+                                    LandmarkData add = new LandmarkData();
+                                    add.name = "标记 " + (n + 1);
+                                    add.startAngle = 0f;
+                                    add.endAngle = 10f;
+                                    ap.data.landmarks.Add(add);
+                                    RebuildLandmarks(ap);
+                                    // 新地标要立刻出现在字段表里（landmarks[n].*），否则得手动重读
+                                    FieldTree.Invalidate();
+                                    Ui.Rebuild();
+                                    EditSession.MarkDirty();
+                                    Log.Info("add landmark -> " + ap.data.landmarks.Count);
+                                    Send(c, "OK addlandmark " + (n + 1) + " count=" + ap.data.landmarks.Count);
+                                    return;
                                 }
                             case "ui":
                                 EditSession.HideInGameUi = (parts.Length > 2 && parts[2] == "off");
@@ -1084,19 +1138,14 @@ namespace PlanetEditor
                                 }
                             case "newplanet":
                                 {
-                                    if (parts.Length < 3) { Send(c, "ERR usage: CMD newplanet <earth|rocky|gas|ice|asteroid|bary>"); return; }
-                                    // 命令被 Split(3) 切成 3 段，这里再拆：<key> [live]
+                                    if (parts.Length < 3) { Send(c, "ERR usage: CMD newplanet <模板名>"); return; }
+                                    // 命令被 Split(3) 切成 3 段，这里再拆：<模板> [live]
                                     string[] subN = parts[2].Trim().Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
                                     string key = subN.Length > 0 ? subN[0].ToLowerInvariant() : "";
                                     bool wantLive = subN.Length > 1 && subN[1].ToLowerInvariant() == "live";
-                                    string tpl = null;
-                                    if (key == "earth") tpl = "Earth";
-                                    else if (key == "rocky") tpl = "Mars";
-                                    else if (key == "gas") tpl = "Jupiter";
-                                    else if (key == "ice") tpl = "Europa";
-                                    else if (key == "asteroid") tpl = "Phobos";
-                                    else if (key == "bary") tpl = "";
-                                    else { Send(c, "ERR unknown template"); return; }
+                                    IFolder packForTpl = PackIO.EnsurePack();
+                                    string tpl = PackTemplates.Resolve(packForTpl, key);
+                                    if (tpl == null) { Send(c, "ERR unknown template"); return; }
 
                                     Planet src = string.IsNullOrEmpty(tpl) ? null : FindPlanet(tpl);
                                     if (!string.IsNullOrEmpty(tpl) && src == null) { Send(c, "ERR template planet not found: " + tpl); return; }
@@ -1230,6 +1279,95 @@ namespace PlanetEditor
                                     return;
 
                                 }
+                            case "templates":
+                                {
+                                    IFolder pk = PackIO.EnsurePack();
+                                    List<string> all = PackTemplates.List(pk);
+                                    List<string> tpls = new List<string>(all.Count);
+                                    for (int i = 0; i < all.Count; i++)
+                                    {
+                                        string[] col = all[i].Split('\t');
+                                        // 来源星球在当前世界不存在就跳过，避免点了报错
+                                        if (col.Length >= 3 && col[2].Length > 0 && FindPlanet(col[2]) == null) continue;
+                                        tpls.Add(all[i]);
+                                    }
+                                    SendMany(c, "TEMPLATES " + tpls.Count, tpls);
+                                    return;
+                                }
+                            case "textures":
+                                {
+                                    // 当前加载到的贴图列表，界面拿去做纹理字段的预设
+                                    if (Base.planetLoader == null || Base.planetLoader.textures == null)
+                                    {
+                                        Send(c, "TEXTURES 0");
+                                        return;
+                                    }
+                                    List<string> names = new List<string>();
+                                    foreach (var kv in Base.planetLoader.textures)
+                                    {
+                                        if (kv.Key != null) names.Add(kv.Key);
+                                    }
+                                    names.Sort(StringComparer.OrdinalIgnoreCase);
+                                    SendMany(c, "TEXTURES " + names.Count, names);
+                                    return;
+                                }
+                            case "getmeta":
+                                {
+                                    IFolder pk = PackIO.EnsurePack();
+                                    PackMeta.Load(pk);
+                                    List<string> ml = PackMeta.Lines();
+                                    SendMany(c, "META " + ml.Count, ml);
+                                    return;
+                                }
+                            case "setmeta":
+                                {
+                                    // CMD setmeta author|version|description 值
+                                    string tailM = parts.Length > 2 ? parts[2].Trim() : "";
+                                    if (tailM.Length == 0) { Send(c, "ERR usage: CMD setmeta <字段> <值>"); return; }
+                                    int sp = tailM.IndexOf(' ');
+                                    if (sp <= 0) { Send(c, "ERR usage: CMD setmeta <字段> <值>"); return; }
+                                    string mKey = tailM.Substring(0, sp).Trim();
+                                    string mVal = tailM.Substring(sp + 1).Trim();
+                                    IFolder pk = PackIO.EnsurePack();
+                                    if (!PackMeta.Set(pk, mKey, mVal)) { Send(c, "ERR unknown meta field"); return; }
+                                    // 元数据变了就重写导入设置，让游戏里显示新的作者信息
+                                    PackIO.WriteSettingsPublic(pk);
+                                    Send(c, "OK setmeta " + mKey + "=" + mVal);
+                                    return;
+                                }
+                            case "backup":
+                                {
+                                    IFolder pk = PackIO.EnsurePack();
+                                    string ts = PackBackup.Snapshot(pk);
+                                    Send(c, ts == null ? "ERR backup failed" : "OK backup " + ts);
+                                    return;
+                                }
+                            case "backups":
+                                {
+                                    IFolder pk = PackIO.EnsurePack();
+                                    List<string> bs = PackBackup.List(pk);
+                                    SendMany(c, "BACKUPS " + bs.Count, bs);
+                                    return;
+                                }
+                            case "restore":
+                                {
+                                    string which = parts.Length > 2 ? parts[2].Trim() : "";
+                                    IFolder pk = PackIO.EnsurePack();
+                                    if (!PackBackup.Restore(pk, which)) { Send(c, "ERR no backup"); return; }
+                                    FieldTree.Invalidate();
+                                    // 恢复完顺手重读一次，界面立刻看到旧数据
+                                    try { EditSession.ReloadFromFile(); } catch (Exception e) { Log.Error("restore reload: " + e.Message); }
+                                    Send(c, "OK restore " + (which.Length > 0 ? which : "latest"));
+                                    return;
+                                }
+                            case "exportzip":
+                                {
+                                    string zipPath = parts.Length > 2 ? parts[2].Trim() : "";
+                                    IFolder pk = PackIO.EnsurePack();
+                                    string res = PackIO.ExportZip(pk, zipPath);
+                                    Send(c, res == null ? "ERR export zip failed" : "OK exportzip " + res);
+                                    return;
+                                }
                             default:
                                 Send(c, "ERR unknown cmd");
 
@@ -1261,6 +1399,34 @@ namespace PlanetEditor
             }
             return null;
 
+        }
+
+        /// <summary>data.landmarks 改过之后，重建运行时 Landmark 组件，地图上的点/名字跟着变。</summary>
+        private static void RebuildLandmarks(Planet p)
+        {
+            try
+            {
+                if (p == null) return;
+
+                if (p.landmarks != null)
+                {
+                    for (int i = 0; i < p.landmarks.Length; i++)
+                        if (p.landmarks[i] != null) UnityEngine.Object.Destroy(p.landmarks[i]);
+                }
+
+                List<LandmarkData> list = p.data != null ? p.data.landmarks : null;
+                if (list == null) { p.landmarks = new Landmark[0]; return; }
+
+                Landmark[] arr = new Landmark[list.Count];
+                for (int i = 0; i < list.Count; i++)
+                {
+                    Landmark lm = p.gameObject.AddComponent<Landmark>();
+                    lm.Initialize(list[i], p);
+                    arr[i] = lm;
+                }
+                p.landmarks = arr;
+            }
+            catch (Exception e) { Log.Error("rebuild landmarks: " + e.Message); }
         }
     }
 }

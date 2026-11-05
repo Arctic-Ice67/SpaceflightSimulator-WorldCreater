@@ -76,6 +76,15 @@
       <HintPath>$(GameManaged)\Unity.TextMeshPro.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- 导出 zip 用；游戏自带这两个程序集 -->
+    <Reference Include="System.IO.Compression">
+      <HintPath>$(GameManaged)\System.IO.Compression.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="System.IO.Compression.FileSystem">
+      <HintPath>$(GameManaged)\System.IO.Compression.FileSystem.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
   <Target Name="CleanReferenceCopies" AfterTargets="Build">

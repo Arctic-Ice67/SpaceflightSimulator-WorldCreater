@@ -1,5 +1,4 @@
 using System;
-using HarmonyLib;
 using ModLoader;
 using UnityEngine;
 
@@ -11,27 +10,22 @@ namespace PlanetEditor
         public override string DisplayName => "World Creater";
         public override string Author => "Ice";
         public override string Description =>
-            "Live planet editing in the world scene: pick a planet, change every value and texture, see it instantly, and the planet file of the solar system (planet pack) is rewritten automatically.";
-        public override string ModVersion => "v0.1.0";
+            "Live planet editing in the world scene: pick a planet, change every value and texture, see it instantly, and the planet file of the solar system (planet pack) is rewritten automatically. Comes with templates, pack metadata, backups and zip export.";
+        public override string ModVersion => "v0.2.1";
         public override string MinimumGameVersionNecessary => "1.6.00.18";
 
         public static Main Instance;
+        public static WorldCreaterKeys Keys;
+
+        // 游戏不会主动调 LoadKeybindings（实测没触发），自己在 Load 里读，
+        // 设置页起来后再把条目插进按键列表（见 WorldCreaterKeys.Tick）。
 
         public override void Load()
         {
             Instance = this;
             Log.Init(ModFolder);
-            try
-            {
-                var harmony = new Harmony("com.arcticice.worldcreater");
-                harmony.PatchAll(typeof(Main).Assembly);
-                Log.Info("harmony patchAll ok");
-            }
-            catch (Exception e)
-            {
-                Log.Error("harmony: " + e);
-            }
-
+            try { Keys = WorldCreaterKeys.Load(this); }
+            catch (Exception e) { Log.Error("keybindings: " + e); }
             Bridge.Start();
 
             var go = new GameObject("WorldCreater_Watcher");

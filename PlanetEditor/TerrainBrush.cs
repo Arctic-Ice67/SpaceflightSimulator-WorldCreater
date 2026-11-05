@@ -215,10 +215,11 @@ namespace PlanetEditor
                 Double2 p;
                 if (TryGetPlanetPoint(out p))
                 {
+                    // 地形只跟角度有关：只要点在这颗星球圆盘上（或紧贴圆盘上方的天空），
+                    // 就按这个方向的地表来刷。以前要求离地表很近，点在圆盘中间根本不生效。
                     double r = p.magnitude;
-                    double surf = planet.Radius + planet.GetTerrainHeightAtAngle(p.AngleRadians, false);
-                    double band = Math.Max(2000.0, RadiusMeters * 4.0);
-                    if (Math.Abs(r - surf) < band)
+                    double rim = planet.Radius + Math.Max(planet.maxTerrainHeight, 1000.0);
+                    if (r < rim * 1.2)
                     {
                         float delta = RateMeters * Time.unscaledDeltaTime * (downR ? -1f : 1f);
                         Paint(planet, p.AngleRadians, delta);

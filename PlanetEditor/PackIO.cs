@@ -79,17 +79,26 @@ namespace PlanetEditor
 
         private static void WriteImportSettings(IFolder pack)
         {
+            PackMeta.Load(pack);
             var import = new SolarSystemSettings
             {
                 includeDefaultPlanets = false,
                 includeDefaultHeightmaps = true,
                 includeDefaultTextures = true,
                 hideStarsInAtmosphere = true,
-                authorName = "World Creater",
-                version = "1.0",
-                description = "Created in game by World Creater"
+                authorName = PackMeta.Author,
+                version = PackMeta.Version,
+                description = PackMeta.Description
             };
             pack.GetFile("Import_Settings.txt").WriteText(JsonWrapper.ToJson(import, true));
+        }
+
+        /// <summary>对外暴露：重写导入设置（改了作者信息后调用）。</summary>
+        public static void WriteSettingsPublic(IFolder pack)
+        {
+            if (pack == null) return;
+            try { WriteImportSettings(pack); }
+            catch (Exception e) { Log.Error("write import settings: " + e.Message); }
         }
 
         private static bool IsOurPack(IFolder pack)
@@ -149,10 +158,45 @@ namespace PlanetEditor
             IFolder dataFolder = pack.GetFolder("Planet Data");
             dataFolder.Create();
             IFile file = dataFolder.GetFile(planet.codeName + ".txt");
+            /* 覆盖前先留一份自动备份，改坏了能退回上一版 */
+            PackBackup.KeepAuto(pack, "Planet Data", planet.codeName + ".txt");
             file.WriteText(JsonWrapper.ToJson(copy, true));
             Log.Info("wrote " + file.Path);
             SaveBrush(pack);
             return file.Path;
+        }
+
+        /// <summary>把当前包打成 zip，方便分享或备份（跳过备份目录和旧 zip）。</summary>
+        public static string ExportZip(IFolder pack, string zipPath)
+        {
+            if (pack == null) return null;
+            try
+            {
+                IFile any = pack.GetFile("Import_Settings.txt");
+                string packDir = null;
+                try { packDir = System.IO.Path.GetDirectoryName(any.Path); } catch { }
+                if (string.IsNullOrEmpty(packDir) || !System.IO.Directory.Exists(packDir)) return "pack path not found";
+                if (string.IsNullOrEmpty(zipPath)) zipPath = System.IO.Path.Combine(packDir, pack.Name + ".zip");
+                if (System.IO.File.Exists(zipPath)) System.IO.File.Delete(zipPath);
+
+                string root = System.IO.Path.GetFullPath(packDir);
+                using (var zip = System.IO.Compression.ZipFile.Open(zipPath, System.IO.Compression.ZipArchiveMode.Create))
+                {
+                    foreach (string file in System.IO.Directory.GetFiles(root, "*", System.IO.SearchOption.AllDirectories))
+                    {
+                        string full = System.IO.Path.GetFullPath(file);
+                        string rel = full.Substring(root.Length).TrimStart('\\', '/');
+                        // 备份目录和 zip 本身不要塞进去
+                        if (rel.StartsWith("Backup\\", StringComparison.OrdinalIgnoreCase)) continue;
+                        if (rel.StartsWith("Backup/", StringComparison.OrdinalIgnoreCase)) continue;
+                        if (rel.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)) continue;
+                        System.IO.Compression.ZipFileExtensions.CreateEntryFromFile(zip, full, rel.Replace('\\', '/'));
+                    }
+                }
+                Log.Info("exported pack zip: " + zipPath);
+                return zipPath;
+            }
+            catch (Exception e) { Log.Error("export zip: " + e.Message); return null; }
         }
 
         /// <summary>把当前加载到的全部高度图补写进包里（缺哪个补哪个），让包自包含。</summary>

@@ -258,9 +258,9 @@ namespace PlanetEditor
 
         private static void HandleInput()
         {
-            float scroll = Input.mouseScrollDelta.y;
-            if (Mathf.Abs(scroll) > 0.001f)
-                _camDist = Mathf.Clamp(_camDist * Mathf.Pow(0.82f, scroll), 8f, 2.5e10f);
+            // 缩放交给游戏自己（滚轮 -> PlayerController.cameraDistance -> viewDistance）。
+            // 这边只读回来算拖拽比例，不再自己改，否则两边每帧各写一次，画面就会抽。
+            try { _camDist = WorldView.main.viewDistance.Value; } catch { }
 
             Camera cam = null;
             try { cam = WorldView.main.worldCamera != null ? WorldView.main.worldCamera.camera : null; } catch { }
@@ -322,7 +322,6 @@ namespace PlanetEditor
             {
                 if (Target == null) return;
                 WorldView.main.SetViewLocation(new Location(Target, _camPos));
-                WorldView.main.viewDistance.Value = _camDist;
             }
             catch (Exception e)
             {
