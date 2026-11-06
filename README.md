@@ -1,3 +1,33 @@
+What Is This?  
+  
+This is an “in-game planet editor” that lets you change any planet values / textures / formulas in real time.  
+    
+Structure   
+  
+It consists of two independent parts, decoupled as processes communicating over local TCP.  
+   
+Features   
+  
+· True real-time editing  
+· Dual-process decoupled architecture  
+· Automatic restoration of difficulty scaling  
+· Liquid glass UI  
+· Add/remove planets / modules at runtime  
+· Safe memory / map management  
+  
+Source Code  
+  
+· Main.cs — Mod entry point   
+· Bridge.cs — Key communication layer  
+· Patches.cs — Takes over the camera and locks time  
+· EditSession.cs — Edit mode state machine  
+· FieldTree.cs — Reflection-driven editable fields  
+· LiveApply.cs — Real-time rebuilding  
+· TerrainBrush.cs — Terrain brush  
+· PackIO.cs — Writing to disk  
+  
+The external panel will not be described here.  
+  
 ## 这是什么
 这是一个「游戏内星球编辑器」 可以让你可以实时改变星球任意数值 / 贴图 / 公式
 ## 结构
