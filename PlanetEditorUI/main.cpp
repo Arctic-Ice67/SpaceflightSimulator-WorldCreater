@@ -344,13 +344,15 @@ static bool EnableAcrylic(HWND hwnd, unsigned int tint_abgr) {
 }
 
 /// <summary>拖动/缩放窗口时把模糊临时换成纯色，窗口跟随鼠标才不拖影。</summary>
+static bool g_movingLook = false;   // 记住当前状态，没变就不重复调 DWM（也防止漏还原）
 static void SetMovingLook(bool moving) {
+    if (g_movingLook == moving) return;
     auto fn = (PFN_SetWindowCompositionAttribute)GetProcAddress(
         GetModuleHandleW(L"user32.dll"), "SetWindowCompositionAttribute");
     if (!fn || !g_hwnd) return;
     ACCENT_POLICY policy{ moving ? 1 : 4, 0, g_accentTint, 0 };
     WINDOWCOMPOSITIONATTRIBDATA data{ 19 /*WCA_ACCENT_POLICY*/, &policy, sizeof(policy) };
-    fn(g_hwnd, &data);
+    if (fn(g_hwnd, &data)) g_movingLook = moving;
 }
 
 // ---------------- 与游戏通信 ----------------
@@ -843,6 +845,54 @@ static void ToggleMaximize() {
         g_customMax = false;
     }
 }
+// ---------------- 标题栏拖动 ----------------
+// 以前是 ReleaseCapture + SendMessage(WM_NCLBUTTONDOWN, HTCAPTION) 交给系统拖：
+// 系统进的是 modal 拖动循环，左键松开那一下被它吃掉，ImGui 以为鼠标还按着，
+// 拖动条一直 active —— 结果点一下上方栏，整个窗口就黏在鼠标上，点哪儿都在拖窗，
+// 所有按钮都按不动（缩小、放大后都一样，只能再点一下才脱开）。
+// 现在自己搬窗口：按下记起点，每帧按光标位移 SetWindowPos，松开即结束。
+static bool  g_titleDrag = false;
+static POINT g_titleDragFrom{};
+static RECT  g_titleDragRect{};
+
+static void BeginTitleDrag() {
+    GetCursorPos(&g_titleDragFrom);
+    if (g_customMax) {
+        // 最大化时拖标题栏 = 先还原，光标按比例落回标题栏，跟系统窗口的手感一致
+        RECT wr{}; GetWindowRect(g_hwnd, &wr);
+        float rel = (wr.right > wr.left)
+            ? (float)(g_titleDragFrom.x - wr.left) / (float)(wr.right - wr.left) : 0.5f;
+        if (rel < 0.f) rel = 0.f;
+        if (rel > 1.f) rel = 1.f;
+        ToggleMaximize();
+        GetWindowRect(g_hwnd, &wr);
+        int nx = g_titleDragFrom.x - (int)(rel * (float)(wr.right - wr.left));
+        int ny = g_titleDragFrom.y - 16;
+        SetWindowPos(g_hwnd, nullptr, nx, ny, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        GetCursorPos(&g_titleDragFrom);
+    }
+    GetWindowRect(g_hwnd, &g_titleDragRect);
+    g_titleDrag = true;
+    SetMovingLook(true);      // 拖动时亚克力换纯色，避免糊成一片
+}
+
+static void UpdateTitleDrag() {
+    if (!g_titleDrag) return;
+    // 用物理键状态收尾：窗口拖到屏幕外或已经失焦时也能正常结束
+    if (!(GetAsyncKeyState(VK_LBUTTON) & 0x8000)) {
+        g_titleDrag = false;
+        SetMovingLook(false);
+        return;
+    }
+    POINT cur{};
+    GetCursorPos(&cur);
+    int dx = cur.x - g_titleDragFrom.x;
+    int dy = cur.y - g_titleDragFrom.y;
+    if (dx == 0 && dy == 0) return;
+    SetWindowPos(g_hwnd, nullptr, g_titleDragRect.left + dx, g_titleDragRect.top + dy, 0, 0,
+                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
 static float g_capAnim[3] = { 0.f, 0.f, 0.f };
 
 // 标题栏按钮：悬停 = 半透明白底 + 整体放大 + 线条加粗，全部带过渡
@@ -889,7 +939,8 @@ static bool CaptionButton(const char* id, int kind) {
 static void DrawTitleBar() {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
-    ImGui::BeginChild("##title", ImVec2(0, 32), ImGuiChildFlags_None);
+    ImGui::BeginChild("##title", ImVec2(0, 32), ImGuiChildFlags_None,
+                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     float w = ImGui::GetWindowWidth();
 
     float textY = (32.f - ImGui::GetTextLineHeight()) * 0.5f;
@@ -909,12 +960,16 @@ static void DrawTitleBar() {
     ImGui::SetCursorPos(ImVec2(bx + bw * 2.f, 0.f));
     if (CaptionButton("##close", 2)) PostMessageW(g_hwnd, WM_CLOSE, 0, 0);
 
-    // 拖动（避开按钮区）
+    // 拖动（避开按钮区）：按下只记录起点，真正的移动在 UpdateTitleDrag 里做
     ImGui::SetCursorPos(ImVec2(0, 0));
-    ImGui::InvisibleButton("##drag", ImVec2(bx - 4.f > 40.f ? bx - 4.f : 40.f, 32));
-    if (ImGui::IsItemActive() && ImGui::IsMouseDragging(0)) {
-        ReleaseCapture();
-        SendMessageW(g_hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+    float dragW = bx - 4.f;
+    if (dragW < 40.f) dragW = 40.f;
+    ImGui::InvisibleButton("##drag", ImVec2(dragW, 32));
+    bool dragHovered = ImGui::IsItemHovered();
+    if (dragHovered && ImGui::IsMouseDoubleClicked(0)) {
+        ToggleMaximize();
+    } else if (ImGui::IsItemActivated() && ImGui::IsMouseDown(0)) {
+        BeginTitleDrag();
     }
     ImGui::EndChild();
     ImGui::PopStyleColor();
@@ -1220,7 +1275,14 @@ static void DrawPlanetList() {
     }
     ImGui::Separator();
 
-    ImGui::BeginChild("##planetlist", ImVec2(240, -338), ImGuiChildFlags_Borders);
+    // 列表高度 = 本栏剩余 - 预览/笔刷固定占位。窗口被压矮时不能让它算成负数塌成一条，
+    // 给个下限，超出的部分交给外层 child 的滚动条。
+    {
+        float availH = ImGui::GetContentRegionAvail().y;
+        float listH = availH - 338.f;
+        if (listH < 150.f) listH = 150.f;
+        ImGui::BeginChild("##planetlist", ImVec2(240, listH), ImGuiChildFlags_Borders);
+    }
 
     const float rowH = 30.f, gap = 3.f;
     const float padX = 6.f, padY = 4.f, textLeft = 12.f, rounding = 12.f;
@@ -2443,7 +2505,12 @@ static void DrawPreview() {
         if (GlassButton(TR("复位视图"), ImVec2(bw, 26))) ResetPreviewView();
     }
 
-    const float H = 240.f;
+    // 画布高度跟着本栏剩余空间走：窗口压矮时不再固定 240 顶着日志区，被裁掉半个圆
+    float H = 240.f;
+    {
+        float availY = ImGui::GetContentRegionAvail().y - 8.f;   // 底下还留一点给笔刷面板
+        if (availY > 90.f && availY < H) H = availY;
+    }
     ImVec2 p = ImGui::GetCursorScreenPos();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(p, ImVec2(p.x + W, p.y + H), IM_COL32(255, 255, 255, 12), 10.f);
@@ -3289,6 +3356,7 @@ static void BuildUI() {
     ImGui::PopStyleVar();
 
     DrawTitleBar();
+    UpdateTitleDrag();
     ImGui::Separator();
 
     // 主界面 / 笔刷编辑 的过渡
@@ -3302,14 +3370,16 @@ static void BuildUI() {
     ImVec2 contentTop = ImGui::GetCursorScreenPos();
 
     float h = ImGui::GetContentRegionAvail().y;
+    float bodyH = h - 118.f;          // 底下留给日志；窗口很矮时别算成负数
+    if (bodyH < 160.f) bodyH = 160.f;
     if (g_view == 0) {
-    ImGui::BeginChild("##left", ImVec2(316, h - 118), ImGuiChildFlags_None);
+    ImGui::BeginChild("##left", ImVec2(316, bodyH), ImGuiChildFlags_None);
     DrawPlanetList();
     DrawPreview();
     DrawBrushPanel();
     ImGui::EndChild();
     ImGui::SameLine();
-    ImGui::BeginChild("##right", ImVec2(0, h - 118), ImGuiChildFlags_None);
+    ImGui::BeginChild("##right", ImVec2(0, bodyH), ImGuiChildFlags_None);
     DrawFields();
     ImGui::EndChild();
 
