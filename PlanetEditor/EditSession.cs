@@ -12,8 +12,6 @@ namespace PlanetEditor
     {
         public static bool Active;
         public static Planet Target;
-        /// <summary>由外部 C++ 面板驱动时，不要再弹出游戏内的 ModGUI 面板。</summary>
-        public static bool HideInGameUi;
 
         public static bool AutoSave = true;
 
@@ -64,7 +62,6 @@ namespace PlanetEditor
 
             Active = true;
             LockTimewarp();
-            if (!HideInGameUi) Ui.Open();
             Log.Info("edit ON target=" + Target.codeName);
             Report("World Creater: ON   (F8 = exit)");
         }
@@ -73,7 +70,6 @@ namespace PlanetEditor
         {
             if (!Active) return;
             Active = false;
-            Ui.Close();
             LockTimewarp();
             try
             {
@@ -97,12 +93,10 @@ namespace PlanetEditor
             {
                 if (!Active)
                 {
-                    HideInGameUi = true;
                     Enter();
                 }
                 if (!Active) return;
                 SetTarget(p);
-                if (HideInGameUi) Ui.Close();
                 LockTimewarp();
                 Log.Info("select " + p.codeName + " (edit=" + Active + ")");
             }
@@ -117,11 +111,17 @@ namespace PlanetEditor
             Target = p;
             try
             {
+                // 选中就校正一次笔刷公式的周长（老存档里可能写的是旧周长，会导致笔刷偏移）；
+                // 周长变了要重建地形，否则画面上还是旧映射的位置。
+                if (TerrainBrush.Ensure(p)) LiveApply.ApplyTerrainOnly(p);
+            }
+            catch (Exception e) { Log.Error("brush sync: " + e); }
+            try
+            {
                 _camPos = Double2.CosSin(Math.PI / 2.0, p.Radius + Math.Max(p.data.basics.timewarpHeight, 500.0));
                 _camDist = (float)Math.Max(p.Radius * 0.08, 500.0);
             }
             catch { }
-            Ui.Rebuild();
         }
 
         public static void NextPlanet(int dir)
@@ -176,7 +176,7 @@ namespace PlanetEditor
                 Log.Error("apply: " + e);
             }
             if (save) SaveNow();
-            else Ui.SetStatus(ok ? "applied" : "apply failed (see log)");
+            else Log.Info(ok ? "apply ok" : "apply failed");
         }
 
         public static void SaveNow()
@@ -185,12 +185,11 @@ namespace PlanetEditor
             try
             {
                 string path = PackIO.Save(Target);
-                Ui.SetStatus(path == null ? "saved (no file)" : "saved: " + path);
+                Log.Info(path == null ? "saved (no file)" : "saved: " + path);
             }
             catch (Exception e)
             {
                 Log.Error("save: " + e);
-                Ui.SetStatus("save failed (see log)");
             }
         }
 
@@ -201,9 +200,8 @@ namespace PlanetEditor
             {
                 bool ok = PackIO.ReloadPlanet(Target);
                 FieldTree.Invalidate();
-                Ui.Rebuild();
                 LiveApply.Apply(Target);
-                Ui.SetStatus(ok ? "reloaded from file" : "no file for this planet");
+                Log.Info(ok ? "reloaded from file" : "no file for this planet");
             }
             catch (Exception e)
             {
@@ -221,7 +219,6 @@ namespace PlanetEditor
             }
 
             LockTimewarp();
-            if (!Ui.IsOpen && !HideInGameUi) Ui.Open();
             try { TerrainBrush.Tick(Target); } catch (Exception e) { Log.Error("brush tick: " + e); }
             HandleInput();
             ApplyCamera();
@@ -233,12 +230,11 @@ namespace PlanetEditor
                 {
                     LiveApply.Apply(Target);
                     if (AutoSave) PackIO.Save(Target);
-                    Ui.SetStatus(AutoSave ? "applied + saved" : "applied");
+                    Log.Info(AutoSave ? "applied + saved" : "applied");
                 }
                 catch (Exception e)
                 {
                     Log.Error("live apply: " + e);
-                    Ui.SetStatus("apply error (see log)");
                 }
             }
         }
@@ -284,8 +280,8 @@ namespace PlanetEditor
             }
 
             float dx = 0f, dy = 0f;
-            // 有输入框在打字时不让 WASD 移镜头
-            bool typing = Ui.IsTyping();
+            // 面板已经搬到外部 exe，游戏里没有输入框了，WASD 一直归镜头
+            bool typing = false;
             if (!typing)
             {
                 if (Input.GetKey(KeyCode.A)) dx -= 1f;

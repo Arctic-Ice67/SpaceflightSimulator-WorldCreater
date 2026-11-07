@@ -26,6 +26,7 @@ namespace PlanetEditor
 
         private static Planet _planet;
         private static HeightMap _curve;
+        private static double _syncedWidth;      // 公式里已经写进去的周长（变了要重写+重编采样器）
         private static float _lastApply = -1f;
         private static bool _dirty;
         private static bool _wasDown;
@@ -38,19 +39,53 @@ namespace PlanetEditor
 
         public static HeightMap Curve { get { return _curve; } }
 
-        /// <summary>确保曲线存在、公式里挂着、采样器已按新公式编译。</summary>
-        public static void Ensure(Planet planet)
+        /// <summary>公式里当前写着的周长（诊断用：应等于 2π·radius）。</summary>
+        public static double FormulaWidth { get { return _syncedWidth; } }
+
+        /// <summary>确保曲线存在、公式里挂着、采样器已按新公式编译。返回 true 表示采样器被重编过（地形需要重建）。</summary>
+        public static bool Ensure(Planet planet)
         {
-            if (planet == null || planet.data == null || planet.data.terrain == null) return;
+            if (planet == null || planet.data == null || planet.data.terrain == null) return false;
             if (!ReferenceEquals(_planet, planet))
             {
                 _planet = planet;
                 _curve = null;
+                _syncedWidth = 0.0;
             }
-            if (_curve != null) return;
 
+            bool replaced = false;
+            if (_curve == null) replaced = CreateOrReuseCurve();
+            // 关键：公式里那条 AddHeightMap 的"周长"决定角度→采样点的映射。
+            // 星球半径改过、或以前写进去的是旧周长，就得整条重写，否则笔刷会偏移（写在这个角度、显示在另一个角度）。
+            bool formula = false;
+            double circ = planet.data.basics.radius * Math.PI * 2.0;
+            if (Math.Abs(_syncedWidth - circ) > 0.5)
+            {
+                formula = EnsureFormula(planet);
+                _syncedWidth = circ;
+            }
+
+            if (formula || replaced)
+            {
+                try
+                {
+                    planet.data.terrain.SetupSamplers(planet.codeName, new MsgNone());
+                    planet.maxTerrainHeight = planet.data.terrain.GetMaxTerrainHeight(planet) + 200.0;
+                }
+                catch (Exception e)
+                {
+                    Log.Error("brush: setup samplers: " + e);
+                }
+                return true;
+            }
+            return false;
+        }
+
+        /// <summary>建立（或复用）笔刷高度图对象，返回 true 表示采样器需要重编。</summary>
+        private static bool CreateOrReuseCurve()
+        {
             PlanetLoader loader = Base.planetLoader;
-            if (loader == null) return;
+            if (loader == null) return false;
 
             bool replaced = false;
             HeightMap existing;
@@ -78,19 +113,7 @@ namespace PlanetEditor
                 Log.Info("brush: created heightmap " + CurveName);
             }
 
-            if (EnsureFormula(planet) || replaced)
-            {
-                try
-                {
-                    planet.data.terrain.SetupSamplers(planet.codeName, new MsgNone());
-                    planet.maxTerrainHeight = planet.data.terrain.GetMaxTerrainHeight(planet) + 200.0;
-                    Log.Info("brush: formula line injected");
-                }
-                catch (Exception e)
-                {
-                    Log.Error("brush: setup samplers: " + e);
-                }
-            }
+            return replaced;
         }
 
         /// <summary>笔刷权重（t = 0..1，0 在中心）。</summary>
@@ -118,13 +141,19 @@ namespace PlanetEditor
             }
             return dst;
         }
+        /// <summary>
+        /// 把笔刷曲线挂进地形公式，并保证那条 AddHeightMap 的周长 = 当前星球周长。
+        /// 采样器算的是 num = surfaceArea / width（surfaceArea 就是 data.basics.radius），
+        /// 所以 width 必须正好等于 2π·radius，否则角度→采样点会被缩放，笔刷就会"画在这里、长在那里"。
+        /// 返回 true 表示公式被改动过（需要重编采样器）。
+        /// </summary>
         private static bool EnsureFormula(Planet planet)
         {
             TerrainModule t = planet.data.terrain;
-            double circ = planet.Radius * Math.PI * 2.0;
+            double circ = planet.data.basics.radius * Math.PI * 2.0;
             string line = "OUTPUT = AddHeightMap(" + CurveName + ", " +
                           circ.ToString("R", CultureInfo.InvariantCulture) + ", 1)";
-            bool added = false;
+            bool changed = false;
 
             if (t.terrainFormulaDifficulties != null && t.terrainFormulaDifficulties.Count > 0)
             {
@@ -132,38 +161,52 @@ namespace PlanetEditor
                 for (int i = 0; i < keys.Count; i++)
                 {
                     string[] arr = t.terrainFormulaDifficulties[keys[i]];
-                    if (arr == null) { arr = new string[0]; }
-                    bool has = false;
-                    for (int j = 0; j < arr.Length; j++)
-                    {
-                        if (arr[j] != null && arr[j].IndexOf(CurveName, StringComparison.Ordinal) >= 0) { has = true; break; }
-                    }
-                    if (has) continue;
-                    string[] bigger = new string[arr.Length + 1];
-                    Array.Copy(arr, bigger, arr.Length);
-                    bigger[arr.Length] = line;
-                    t.terrainFormulaDifficulties[keys[i]] = bigger;
-                    added = true;
+                    string[] fixedArr = FixArray(arr, line, ref changed);
+                    if (fixedArr != null) t.terrainFormulaDifficulties[keys[i]] = fixedArr;
                 }
             }
             else
             {
-                string[] arr = t.terrainFormula ?? new string[0];
-                bool has = false;
-                for (int j = 0; j < arr.Length; j++)
-                {
-                    if (arr[j] != null && arr[j].IndexOf(CurveName, StringComparison.Ordinal) >= 0) { has = true; break; }
-                }
-                if (!has)
-                {
-                    string[] bigger = new string[arr.Length + 1];
-                    Array.Copy(arr, bigger, arr.Length);
-                    bigger[arr.Length] = line;
-                    t.terrainFormula = bigger;
-                    added = true;
-                }
+                string[] fixedArr = FixArray(t.terrainFormula, line, ref changed);
+                if (fixedArr != null) t.terrainFormula = fixedArr;
             }
-            return added;
+
+            if (changed)
+            {
+                Log.Info("brush: formula synced, width=" + circ.ToString("F1", CultureInfo.InvariantCulture)
+                         + " (radius=" + planet.data.basics.radius.ToString("F1", CultureInfo.InvariantCulture) + ")");
+            }
+            return changed;
+        }
+
+        /// <summary>存在就校正周长（重复的只留一条），不存在就追加。没有改动时返回 null。</summary>
+        private static string[] FixArray(string[] arr, string line, ref bool changed)
+        {
+            if (arr == null) arr = new string[0];
+
+            List<string> keep = new List<string>(arr.Length + 1);
+            bool seen = false, differs = false;
+            for (int j = 0; j < arr.Length; j++)
+            {
+                string s = arr[j];
+                if (s != null && s.IndexOf(CurveName, StringComparison.Ordinal) >= 0)
+                {
+                    if (seen) { differs = true; continue; }   // 重复的丢掉
+                    seen = true;
+                    if (!string.Equals(s, line, StringComparison.Ordinal)) differs = true;
+                    keep.Add(line);                            // 位置不变，内容按摩当前周长重写
+                    continue;
+                }
+                keep.Add(s);
+            }
+            if (!seen)
+            {
+                keep.Add(line);
+                differs = true;
+            }
+            if (!differs) return null;
+            changed = true;
+            return keep.ToArray();
         }
 
         /// <summary>在某个角度刷一下（deltaMeters &lt; 0 就是挖）。</summary>
@@ -209,7 +252,7 @@ namespace PlanetEditor
                 while (_undo.Count > UndoMax) _undo.RemoveAt(0);
             }
 
-            if (down && !Ui.IsPointerOverPanel(Input.mousePosition))
+            if (down)
             {
                 Ensure(planet);
                 Double2 p;
@@ -237,7 +280,6 @@ namespace PlanetEditor
                 try
                 {
                     LiveApply.ApplyTerrainOnly(planet);
-                    Ui.RefreshPreview();
                 }
                 catch (Exception e)
                 {
@@ -313,7 +355,6 @@ namespace PlanetEditor
                 int old = _curve.points.Length;
                 _curve.points = Resample(_curve.points, n);
                 Log.Info("brush: samples " + old + " -> " + n);
-                Ui.RefreshPreview();
                 return true;
             }
             catch (Exception e)
@@ -346,7 +387,6 @@ namespace PlanetEditor
                 if (snap.Length == _curve.points.Length)
                     Array.Copy(snap, _curve.points, snap.Length);
                 LiveApply.ApplyTerrainOnly(planet);
-                Ui.RefreshPreview();
                 Log.Info("brush: undo (" + _undo.Count + " left)");
                 return true;
             }
@@ -371,7 +411,6 @@ namespace PlanetEditor
                 _redo.Clear();
                 Array.Clear(_curve.points, 0, _curve.points.Length);
                 ApplyNow(planet);
-                Ui.RefreshPreview();
                 Log.Info("brush: cleared (back to original terrain)");
                 return true;
             }
@@ -416,7 +455,6 @@ namespace PlanetEditor
                 _undo.Add(cur);
                 if (snap.Length == _curve.points.Length) Array.Copy(snap, _curve.points, snap.Length);
                 LiveApply.ApplyTerrainOnly(planet);
-                Ui.RefreshPreview();
                 Log.Info("brush: redo");
                 return true;
             }

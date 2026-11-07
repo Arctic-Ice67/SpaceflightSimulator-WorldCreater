@@ -15,7 +15,6 @@ namespace PlanetEditor
                 WorldCreaterKeys.Tick();
                 Bridge.Pump();
                 try { LiveApply.EnsureMapPlanets(); } catch (Exception e) { Log.Error("map tick: " + e.Message); }
-                Ui.TickInput();
                 EditSession.Tick();
                 TickBrushOutsideEdit();
             }

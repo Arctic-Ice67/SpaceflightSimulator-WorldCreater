@@ -328,7 +328,7 @@ namespace PlanetEditor
                         Log.Error("texture " + f.Name + ": " + e.Message);
                     }
                 }
-                Ui.SetStatus("textures loaded: " + n);
+                Log.Info("textures loaded: " + n);
             }
             catch (Exception e)
             {

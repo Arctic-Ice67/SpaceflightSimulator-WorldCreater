@@ -11,7 +11,6 @@ namespace PlanetEditor
     public class WorldCreaterKeys : ModKeybindings
     {
         public KeybindingsPC.Key ToggleEdit = KeyCode.F8;
-        public KeybindingsPC.Key TogglePanel = KeyCode.F11;
         public KeybindingsPC.Key SaveNow = KeyCode.F7;
         public KeybindingsPC.Key ReloadFile = KeyCode.F10;
         public KeybindingsPC.Key ToggleBrush = KeyCode.P;
@@ -52,8 +51,7 @@ namespace PlanetEditor
             }
 
             CreateUI_Text("World Creater");
-            CreateUI_Keybinding(ToggleEdit, KeyCode.F8, "Toggle planet edit");
-            CreateUI_Keybinding(TogglePanel, KeyCode.F11, "Toggle editor panel");
+            CreateUI_Keybinding(ToggleEdit, KeyCode.F8, "Toggle free camera (edit mode)");
             CreateUI_Keybinding(SaveNow, KeyCode.F7, "Save planet");
             CreateUI_Keybinding(ReloadFile, KeyCode.F10, "Reload planet file");
             CreateUI_Keybinding(ToggleBrush, KeyCode.P, "Terrain brush");
@@ -77,7 +75,6 @@ namespace PlanetEditor
             try
             {
                 GameManager.AddOnKeyDown(Ref(() => _inst.ToggleEdit), () => EditSession.Toggle());
-                GameManager.AddOnKeyDown(Ref(() => _inst.TogglePanel), DoTogglePanel);
                 GameManager.AddOnKeyDown(Ref(() => _inst.SaveNow), () => EditSession.ApplyNow(true));
                 GameManager.AddOnKeyDown(Ref(() => _inst.ReloadFile), () => EditSession.ReloadFromFile());
                 GameManager.AddOnKeyDown(Ref(() => _inst.ToggleBrush), DoToggleBrush);
@@ -89,22 +86,14 @@ namespace PlanetEditor
             }
         }
 
-        private static void DoTogglePanel()
-        {
-            if (Ui.IsOpen) { Ui.Close(); return; }
-            if (EditSession.Target == null)
-            {
-                Planet[] all = EditSession.AllPlanets();
-                if (all.Length > 0) EditSession.Target = all[0];
-            }
-            if (EditSession.Target != null) Ui.Open();
-        }
-
         private static void DoToggleBrush()
         {
             TerrainBrush.Enabled = !TerrainBrush.Enabled;
             if (TerrainBrush.Enabled) TerrainBrush.Ensure(EditSession.Target);
-            Ui.SetStatus(TerrainBrush.Enabled
+            Log.Info(TerrainBrush.Enabled
+                ? "paint ON  LMB=raise RMB=lower  radius=" + (int)TerrainBrush.RadiusMeters + "m"
+                : "paint OFF");
+            EditSession.Report(TerrainBrush.Enabled
                 ? "PAINT ON  LMB=raise RMB=lower  Ctrl+wheel=brush " + (int)TerrainBrush.RadiusMeters + "m"
                 : "PAINT OFF");
         }

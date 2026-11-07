@@ -11,7 +11,7 @@ namespace PlanetEditor
         public override string Author => "Ice";
         public override string Description =>
             "Live planet editing in the world scene: pick a planet, change every value and texture, see it instantly, and the planet file of the solar system (planet pack) is rewritten automatically. Comes with templates, pack metadata, backups and zip export.";
-        public override string ModVersion => "v0.2.1";
+        public override string ModVersion => "v0.3.0";
         public override string MinimumGameVersionNecessary => "1.6.00.18";
 
         public static Main Instance;

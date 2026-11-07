@@ -798,7 +798,6 @@ namespace PlanetEditor
 
                         EditSession.SelectPlanet(p);
 
-                        Ui.Rebuild();
                         List<FieldEntry> entries = FieldTree.For(p);
                         /* FIELDS 星球 前缀：带前缀时只回该分组的字段，界面上可以做分组显示 */
                         string prefix = parts.Length > 2 ? parts[2].Trim() : "";
@@ -852,11 +851,24 @@ namespace PlanetEditor
 
                         TerrainBrush.MaybeBeginStroke();
 
+                        // 刷之前之后各读一次这个角度的高度，回执给面板核对位置
+                        double h0 = HeightAt(p, ang);
+
                         TerrainBrush.Paint(p, ang, (float)delta);
 
                         TerrainBrush.ApplyNow(p);
 
+                        double h1 = HeightAt(p, ang);
+
                         TerrainBrush.Enabled = was;
+
+                        string ack = string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                            "OK paint ang={0:F2} delta={1:F1} h={2:F1}->{3:F1} n={4} w={5:F1}",
+                            ang * 180.0 / Math.PI, delta, h0, h1, TerrainBrush.SampleCount, TerrainBrush.FormulaWidth);
+
+                        Log.Info(ack);
+
+                        Send(c, ack);
 
                         return;
 
@@ -956,7 +968,6 @@ namespace PlanetEditor
                         EditSession.ApplyNow(false);
                         EditSession.MarkDirty();   // 放在 apply 之后，避免被清掉
                         Log.Info("set " + p.codeName + " " + path + " = " + hit.GetText());
-                        Ui.Rebuild();
                         Send(c, "OK " + path + " = " + hit.GetText());
 
                         return;
@@ -1039,7 +1050,6 @@ namespace PlanetEditor
                                     RebuildLandmarks(dp);
                                     // 地标数量变了，字段表（landmarks[i].*）必须重扫，否则 FIELDS 还回旧列表
                                     FieldTree.Invalidate();
-                                    Ui.Rebuild();
                                     EditSession.MarkDirty();
                                     Log.Info("delete landmark " + idx + " (" + gone + ") -> " + dp.data.landmarks.Count);
                                     Send(c, "OK dellandmark " + idx + " count=" + dp.data.landmarks.Count);
@@ -1061,16 +1071,14 @@ namespace PlanetEditor
                                     RebuildLandmarks(ap);
                                     // 新地标要立刻出现在字段表里（landmarks[n].*），否则得手动重读
                                     FieldTree.Invalidate();
-                                    Ui.Rebuild();
                                     EditSession.MarkDirty();
                                     Log.Info("add landmark -> " + ap.data.landmarks.Count);
                                     Send(c, "OK addlandmark " + (n + 1) + " count=" + ap.data.landmarks.Count);
                                     return;
                                 }
                             case "ui":
-                                EditSession.HideInGameUi = (parts.Length > 2 && parts[2] == "off");
-
-                                Send(c, "OK ui=" + (EditSession.HideInGameUi ? "off" : "on"));
+                                // 游戏内面板已移除，老面板发来的命令直接忽略
+                                Send(c, "OK ui=off");
 
                                 return;
 
@@ -1382,6 +1390,13 @@ namespace PlanetEditor
                     return;
 
             }
+        }
+
+        /// <summary>读某个角度（弧度）的地表高度，出错就当 0。</summary>
+        private static double HeightAt(Planet p, double angleRadians)
+        {
+            try { return p.GetTerrainHeightAtAngle(angleRadians, false); }
+            catch { return 0.0; }
         }
 
         private static Planet FindPlanet(string codeName)

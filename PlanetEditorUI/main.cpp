@@ -203,6 +203,7 @@ static const TrPair kTr[] = {
     { "连接已断开", "Connection lost" },
     { "适应视图", "Fit view" },
     { "选中星球后显示预览", "Select a planet to see preview" },
+    { "读取地形…", "Loading terrain…" },
     { "极坐标编辑", "Polar edit" },
     { "坐标预览", "Coords" },
     { "坐标预览 开", "Coords on" },
@@ -330,13 +331,26 @@ struct ACCENT_POLICY { int AccentState; int AccentFlags; unsigned int GradientCo
 struct WINDOWCOMPOSITIONATTRIBDATA { int Attrib; void* pvData; size_t cbData; };
 typedef BOOL(WINAPI* PFN_SetWindowCompositionAttribute)(HWND, WINDOWCOMPOSITIONATTRIBDATA*);
 
+static unsigned int g_accentTint = 0x6E18120E;   // AABBGGRR：#0E1218 @43%
+
 static bool EnableAcrylic(HWND hwnd, unsigned int tint_abgr) {
     auto fn = (PFN_SetWindowCompositionAttribute)GetProcAddress(
         GetModuleHandleW(L"user32.dll"), "SetWindowCompositionAttribute");
     if (!fn) return false;
+    g_accentTint = tint_abgr;
     ACCENT_POLICY policy{ 4 /*ACCENT_ENABLE_ACRYLICBLURBEHIND*/, 0, tint_abgr, 0 };
     WINDOWCOMPOSITIONATTRIBDATA data{ 19 /*WCA_ACCENT_POLICY*/, &policy, sizeof(policy) };
     return fn(hwnd, &data) != FALSE;
+}
+
+/// <summary>拖动/缩放窗口时把模糊临时换成纯色，窗口跟随鼠标才不拖影。</summary>
+static void SetMovingLook(bool moving) {
+    auto fn = (PFN_SetWindowCompositionAttribute)GetProcAddress(
+        GetModuleHandleW(L"user32.dll"), "SetWindowCompositionAttribute");
+    if (!fn || !g_hwnd) return;
+    ACCENT_POLICY policy{ moving ? 1 : 4, 0, g_accentTint, 0 };
+    WINDOWCOMPOSITIONATTRIBDATA data{ 19 /*WCA_ACCENT_POLICY*/, &policy, sizeof(policy) };
+    fn(g_hwnd, &data);
 }
 
 // ---------------- 与游戏通信 ----------------
@@ -374,13 +388,20 @@ static std::vector<PlanetInfo> g_planets;
 static std::vector<FieldRow> g_fields;
 
 // 星球形状预览（由 C# 端 SHAPE 命令推送）
-static std::vector<float> g_shape;      // 一圈地形高度（米）
+static std::vector<float> g_shape;      // 一圈地形高度（米），只放"已收完"的整圈
 static double g_shapeRadius = 0.0;
 static int g_shapeCol[3] = { 150, 150, 150 };
 static double g_lastShape = 0.0;
 static std::vector<float> g_shapeHi;   // 导出用的高精度轮廓
 static bool g_wantFine = false;      // 正在等高精度数据
 static bool g_readingFine = false;
+
+// SHAPE 是逐行推过来的，4096 行会跨好几帧。先收进缓冲，收满再一次性替换，
+// 否则中间那几帧会画出半圈轮廓（看起来就是边缘在抽动）。
+static std::vector<float> g_shapeIn;
+static double g_radiusIn = 0.0;
+static int g_colIn[3] = { 150, 150, 150 };
+static float g_hRef = 0.f;              // 画轮廓用的参考起伏，带迟滞，避免采样网格每帧都变
 
 static bool ExportHeightmapPng(const std::vector<float>& src);
 
@@ -505,7 +526,7 @@ static void HandleLine(const std::string& line) {
             if (!p.code.empty()) g_planets.push_back(p);
         } else if (g_pending_kind == 3) {
             float hv = (float)atof(line.c_str());
-            if (g_readingFine) g_shapeHi.push_back(hv); else g_shape.push_back(hv);
+            if (g_readingFine) g_shapeHi.push_back(hv); else g_shapeIn.push_back(hv);
         } else if (g_pending_kind == 4) {
             // 模板行：key \t 名字 \t 来源
             g_templates.push_back(line);
@@ -548,6 +569,14 @@ static void HandleLine(const std::string& line) {
                 g_wantFine = false;
                 ExportHeightmapPng(g_shapeHi);
             }
+            else if (g_pending_kind == 3 && g_shapeIn.size() >= 8) {
+                // 整圈到齐，原子替换（含半径与配色，避免半径先变、点还没到）
+                g_shape.swap(g_shapeIn);
+                g_shapeRadius = g_radiusIn;
+                g_shapeCol[0] = g_colIn[0]; g_shapeCol[1] = g_colIn[1]; g_shapeCol[2] = g_colIn[2];
+                g_lastShape = ImGui::GetTime();
+                g_hRef = 0.f;      // 换了一颗星球/换了一圈数据，采样尺度重新起算
+            }
             g_pending_kind = 0;
         }
         return;
@@ -583,13 +612,13 @@ static void HandleLine(const std::string& line) {
                 g_shapeHi.reserve(n > 0 ? n : 0);
                 g_readingFine = true;
             } else {
-                g_shape.clear();
-                g_shape.reserve(n > 0 ? n : 0);
+                // 收进缓冲，先别动 g_shape：整圈到齐了再换，画面就不会抖
+                g_shapeIn.clear();
+                g_shapeIn.reserve(n > 0 ? n : 0);
+                g_radiusIn = radius;
+                g_colIn[0] = r; g_colIn[1] = gg; g_colIn[2] = b;
                 g_readingFine = false;
-                g_lastShape = ImGui::GetTime();
             }
-            g_shapeRadius = radius;
-            g_shapeCol[0] = r; g_shapeCol[1] = gg; g_shapeCol[2] = b;
             // 默认强度跟着星球半径走，否则在几百公里半径的星球上刷一下根本看不出来
             if (!g_rateTouched && std::string(code) != g_ratePlanet) {
                 g_ratePlanet = code;
@@ -644,7 +673,12 @@ static void HandleLine(const std::string& line) {
         LogLine(line);
         return;
     }
-    if (line.rfind("OK", 0) == 0 || line.rfind("ERR", 0) == 0) { LogLine(line); return; }
+    if (line.rfind("OK", 0) == 0 || line.rfind("ERR", 0) == 0) {
+        // 笔刷回执写进日志，方便核对「点的位置」和「真正刷到的角度」
+        if (line.rfind("OK paint", 0) == 0 || line.rfind("ERR", 0) == 0) Dbg("< %s", line.c_str());
+        LogLine(line);
+        return;
+    }
     LogLine(line);
 }
 
@@ -772,6 +806,13 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
     case WM_SYSCOMMAND:
         if ((wParam & 0xfff0) == SC_KEYMENU) return 0;
+        break;
+    case WM_ENTERSIZEMOVE:
+        // 开始拖窗：亚克力模糊每帧重算，换成纯色后跟随鼠标才不拖影
+        SetMovingLook(true);
+        break;
+    case WM_EXITSIZEMOVE:
+        SetMovingLook(false);
         break;
     case WM_DESTROY:
         PostQuitMessage(0);
@@ -2417,7 +2458,7 @@ static void DrawPreview() {
 
     if (g_shape.size() < 8 || g_shapeRadius <= 0.0) {
         dl->AddText(ImVec2(p.x + 12.f, p.y + H * 0.5f - 8.f), IM_COL32(150, 160, 175, 255),
-                    TR("选中星球后显示预览"));
+                    g_selected.empty() ? TR("选中星球后显示预览") : TR("读取地形…"));
         ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + H));
         return;
     }
@@ -2479,51 +2520,124 @@ static void DrawPreview() {
     };
     auto surfR = [&](double deg) {
         double a = deg * PI / 180.0;
-        if (a < 0) a += PI * 2.0;
-        int bi = (int)(a / (PI * 2.0) * n);
-        if (bi < 0) bi = 0;
-        if (bi >= n) bi = n - 1;
-        return (float)((g_shapeRadius + g_shape[bi]) * scale);
+        while (a < 0) a += PI * 2.0;
+        while (a >= PI * 2.0) a -= PI * 2.0;
+        double t = a / (PI * 2.0) * n;
+        int i0 = (int)t % n;
+        int i1 = (i0 + 1) % n;
+        double f = t - (double)(int)t;
+        double h = g_shape[i0] * (1.0 - f) + g_shape[i1] * f;   // 两个采样点之间线性插值，别出现台阶
+        return (float)((g_shapeRadius + h) * scale);
     };
+
+    // 轮廓与扇形共用的角度步长：屏幕上约 2.2 像素一段。
+    // 4096 个采样点直接画，在缩小的圆盘上每段只有零点几像素，1.2px 的线互相重叠、
+    // 抗锯齿边缘反复叠加，就成了一片灰白网纹（摩尔纹）。按像素密度抽稀即可，放大后会自动恢复细节。
+    // 参考起伏带迟滞：一边刷地形时 maxH 一直在变，若每帧都跟着改段数，轮廓边缘就会一抽一抽。
+    if (maxH > g_hRef * 1.12f || maxH < g_hRef * 0.88f) g_hRef = maxH;
+    float degStep = 1.f;
+    {
+        float rTip = (float)((g_shapeRadius + (g_hRef > 0.f ? g_hRef : 0.f)) * scale);
+        float pxPerDeg = rTip * (float)(PI / 180.0);
+        degStep = (pxPerDeg > 0.02f) ? (2.2f / pxPerDeg) : 6.f;
+        if (degStep < 0.05f) degStep = 0.05f;
+        if (degStep > 6.f) degStep = 6.f;
+    }
 
     ImU32 rim = IM_COL32(
         (int)(g_shapeCol[0] * 0.55f + 255 * 0.45f),
         (int)(g_shapeCol[1] * 0.55f + 255 * 0.45f),
         (int)(g_shapeCol[2] * 0.55f + 255 * 0.45f), 255);
 
-    // 盘面：由外到内叠 8 层，做出球面的假体积感
+    // 全圈按像素密度抽稀后的段数（放大到极限时也不超过原始采样数）
+    int loop = (int)(360.0 / degStep + 0.5);
+    if (loop < 48) loop = 48;
+    if (loop > n) loop = n;
+
+    // 盘面：叠多层做球面的假体积感。层数拉多色阶才细腻（8 层放大后是一条条同心色带）；
+    // 放大细看时不画层，直接铺单色，免得看到一圈圈边。
     ImDrawListFlags savedFlags = dl->Flags;
     dl->Flags &= ~ImDrawListFlags_AntiAliasedFill;
-    const int LAYERS = 8;
+    const int LAYERS = (g_pvZoom < 2.f) ? 24 : 1;
+    int layerSeg = loop;
+    if (layerSeg > 256) layerSeg = 256;
+    if (layerSeg < 48) layerSeg = 48;
     for (int layer = 0; layer < LAYERS; layer++) {
-        float t = (float)layer / (float)(LAYERS - 1);
+        float t = (LAYERS > 1) ? (float)layer / (float)(LAYERS - 1) : 0.f;
         float ring = 1.0f - 0.72f * t;
-        float shade = 0.62f + 0.34f * t;
+        // 单色时取 24 层的平均亮度，切过去不会闪一下
+        float shade = (LAYERS > 1) ? (0.62f + 0.34f * t) : 0.79f;
         ImU32 col = IM_COL32(
             (int)(g_shapeCol[0] * shade),
             (int)(g_shapeCol[1] * shade),
             (int)(g_shapeCol[2] * shade), 255);
-        for (int i = 0; i < n; i++) {
-            int j = (i + 1) % n;
-            double a0 = PI * 2.0 * i / n, a1 = PI * 2.0 * j / n;
-            float r0 = (float)((g_shapeRadius + g_shape[i]) * scale) * ring;
-            float r1 = (float)((g_shapeRadius + g_shape[j]) * scale) * ring;
-            ImVec2 q0(ctr.x + (float)cos(a0) * r0, ctr.y - (float)sin(a0) * r0);
-            ImVec2 q1(ctr.x + (float)cos(a1) * r1, ctr.y - (float)sin(a1) * r1);
+        for (int k = 0; k < layerSeg; k++) {
+            double d0 = 360.0 * k / layerSeg;
+            double d1 = 360.0 * (k + 1) / layerSeg;
+            float r0 = surfR(d0) * ring;
+            float r1 = surfR(d1) * ring;
+            ImVec2 q0 = ptAt(d0, r0);
+            ImVec2 q1 = ptAt(d1, r1);
             dl->AddTriangleFilled(ctr, q0, q1, col);
         }
     }
     dl->Flags = savedFlags;
 
-    // 地形轮廓
-    for (int i = 0; i < n; i++) {
-        int j = (i + 1) % n;
-        double a0 = PI * 2.0 * i / n, a1 = PI * 2.0 * j / n;
-        float r0 = (float)((g_shapeRadius + g_shape[i]) * scale);
-        float r1 = (float)((g_shapeRadius + g_shape[j]) * scale);
-        ImVec2 q0(ctr.x + (float)cos(a0) * r0, ctr.y - (float)sin(a0) * r0);
-        ImVec2 q1(ctr.x + (float)cos(a1) * r1, ctr.y - (float)sin(a1) * r1);
-        dl->AddLine(q0, q1, rim, 1.2f);
+    // 海洋：海平面就是半径球面（地形高度 0）。低于海面的角度只画"地形表面 → 海面"这一层水，
+    // 不能从圆心整个扇区涂蓝——那样一点点低洼就变成一大片深蓝，看着像汪洋，其实海底才差几十米。
+    // 星球没有 water 模块（字段树里没有 water.* ）就不画，免得把干盆地涂成海。
+    {
+        bool hasWater = false;
+        for (size_t fi = 0; fi < g_fields.size(); fi++) {
+            if (g_fields[fi].path.rfind("water.", 0) == 0) { hasWater = true; break; }
+        }
+        if (hasWater) {
+            const ImU32 seaWater = IM_COL32(64, 146, 220, 200);  // 水层（薄薄一层，透一点底色）
+            const ImU32 seaRim = IM_COL32(176, 226, 255, 225);   // 海面线（水陆交界）
+            float rSea = (float)(g_shapeRadius * scale);
+            const float seaMinThick = 1.2f;   // 再浅的海也留一条看得见的蓝线，不然缩小时会消失
+            ImDrawListFlags wFlags = dl->Flags;
+            dl->Flags &= ~ImDrawListFlags_AntiAliasedFill;
+            // 内侧点：地形表面；但离海面不足 seaMinThick 时压到 seaMinThick，保证可见
+            auto wetIn = [&](float s) {
+                if (s >= rSea) return rSea;
+                float lo = rSea - seaMinThick;
+                return s < lo ? s : lo;
+            };
+            for (int k = 0; k < loop; k++) {
+                double d0 = 360.0 * k / loop, d1 = 360.0 * (k + 1) / loop;
+                float s0 = surfR(d0), s1 = surfR(d1);
+                if (s0 >= rSea && s1 >= rSea) continue;      // 这一段全是陆地
+                ImVec2 a0 = ptAt(d0, wetIn(s0)), a1 = ptAt(d1, wetIn(s1));
+                ImVec2 b0 = ptAt(d0, rSea), b1 = ptAt(d1, rSea);
+                dl->AddQuadFilled(a0, b0, b1, a1, seaWater);
+            }
+            dl->Flags = wFlags;
+            // 海面弧只画在水域那几段，用连续路径描边（逐段 AddLine 会在接缝处冒出亮点）
+            bool inArc = false;
+            for (int k = 0; k <= loop; k++) {
+                double deg = 360.0 * (double)k / (double)loop;
+                bool wet = surfR(deg) < rSea;
+                if (wet) {
+                    if (!inArc) { dl->PathClear(); inArc = true; }
+                    dl->PathLineTo(ptAt(deg, rSea));
+                } else if (inArc) {
+                    dl->PathStroke(seaRim, 0, 1.5f);
+                    inArc = false;
+                }
+            }
+            if (inArc) dl->PathStroke(seaRim, 0, 1.5f);
+        }
+    }
+
+    // 地形轮廓（同样抽稀，避免上千条亚像素线段叠成摩尔纹）
+    {
+        dl->PathClear();
+        for (int k = 0; k <= loop; k++) {
+            double deg = 360.0 * (double)k / (double)loop;
+            dl->PathLineTo(ptAt(deg, surfR(deg)));
+        }
+        dl->PathStroke(rim, 0, 1.2f);
     }
 
     // 方位刻度
@@ -2563,20 +2677,23 @@ static void DrawPreview() {
             double w = ev - sv;
             while (w <= 0.0) w += 360.0;
             if (w > 360.0) w = 360.0;
-            // 扇形填充：内圈到地形表面
-            int seg = (int)(w / 3.0) + 2;
-            if (seg > 120) seg = 120;
+            // 扇形：沿地形走，段数按像素密度抽稀（和轮廓同一把尺子）
+            int seg = (int)(w / (double)degStep) + 1;
+            if (seg < 6) seg = 6;
+            if (seg > 720) seg = 720;
             float rIn = (float)(g_shapeRadius * scale) * 0.35f;
-            dl->PathClear();
-            for (int k = 0; k <= seg; k++) {
-                double deg = sv + w * k / seg;
-                dl->PathLineTo(ptAt(deg, surfR(deg)));
+            // 关掉填充抗锯齿：相邻条带用同一个顶点（d1 完全相同），光栅化时共享边只画一次；
+            // 开着抗锯齿则每段边缘各混一次 alpha，半透明叠加后就是一条条放射状亮纹（摩尔纹）。
+            ImDrawListFlags fillFlags = dl->Flags;
+            dl->Flags &= ~ImDrawListFlags_AntiAliasedFill;
+            for (int k = 0; k < seg; k++) {
+                double d0 = sv + w * k / seg;
+                double d1 = sv + w * (k + 1) / seg;
+                ImVec2 o0 = ptAt(d0, surfR(d0)), o1 = ptAt(d1, surfR(d1));
+                ImVec2 i0 = ptAt(d0, rIn), i1 = ptAt(d1, rIn);
+                dl->AddQuadFilled(i0, o0, o1, i1, redFill);
             }
-            ImVec2 innerEnd = ptAt(sv + w, rIn);
-            ImVec2 innerStart = ptAt(sv, rIn);
-            dl->PathLineTo(innerEnd);
-            dl->PathLineTo(innerStart);
-            dl->PathFillConvex(redFill);
+            dl->Flags = fillFlags;
 
             // 外弧描边
             dl->PathClear();
@@ -2589,6 +2706,8 @@ static void DrawPreview() {
             // 两条边界线 + 端点手柄
             ImVec2 pStart = ptAt(sv, surfR(sv));
             ImVec2 pEnd = ptAt(sv + w, surfR(sv + w));
+            ImVec2 innerStart = ptAt(sv, rIn);
+            ImVec2 innerEnd = ptAt(sv + w, rIn);
             dl->AddLine(innerStart, pStart, redDim, 1.4f);
             dl->AddLine(innerEnd, pEnd, redDim, 1.4f);
 
@@ -2750,9 +2869,9 @@ static void DrawBigHeightMap(float W, float H) {
 
     ImVec2 mp = ImGui::GetMousePos();
     bool inside = mp.x >= q0.x && mp.x <= q1.x && mp.y >= q0.y && mp.y <= q1.y;
-    float angle = 0.f, targetH = 0.f;
+    float angle = 0.f, targetH = 0.f, tx = 0.f;
     if (inside) {
-        float tx = (mp.x - q0.x) / (q1.x - q0.x);
+        tx = (mp.x - q0.x) / (q1.x - q0.x);
         if (tx < 0.f) tx = 0.f;
         if (tx > 1.f) tx = 1.f;
         angle = (lo + tx * (hi - lo)) * 6.2831853f;
@@ -2802,20 +2921,23 @@ static void DrawBigHeightMap(float W, float H) {
         static double lastSend = 0.0;
         double now = ImGui::GetTime();
         bool moved = ImGui::GetIO().MouseDelta.x != 0.f || ImGui::GetIO().MouseDelta.y != 0.f;
-        if (now - lastSend > 0.033 && !g_selected.empty()) {
+        // 刚按下也要先落一笔，否则「点一下不动」看着像没反应
+        bool pressed = ImGui::IsMouseClicked(0) || ImGui::IsMouseClicked(1);
+        if ((moved || pressed) && now - lastSend > 0.033 && !g_selected.empty()) {
             lastSend = now;
             char cmd[160];
             if (g_paintMode == 0) {
-                if (moved) {
-                    float delta = g_rate * 0.033f * (rmb ? -1.f : 1.f);
-                    snprintf(cmd, sizeof(cmd), "PAINTAT %s %.6f %.2f", g_selected.c_str(), angle, (double)delta);
-                    SendCmd(cmd);
-                    SendCmd("SHAPE " + g_selected);
-                }
+                float delta = g_rate * 0.033f * (rmb ? -1.f : 1.f);
+                snprintf(cmd, sizeof(cmd), "PAINTAT %s %.6f %.2f", g_selected.c_str(), angle, (double)delta);
+                SendCmd(cmd);
+                Dbg("paint px=%.1f x0=%.1f tx=%.4f deg=%.2f delta=%.1f R=%.0f n=%d",
+                    mp.x, q0.x, tx, angle * 57.29577951308232f, delta, g_shapeRadius, (int)g_shape.size());
+                SendCmd("SHAPE " + g_selected);
             } else {
                 double tgt = rmb ? 0.0 : (double)targetH;
                 snprintf(cmd, sizeof(cmd), "PAINTTO %s %.6f %.2f 0.45", g_selected.c_str(), angle, tgt);
                 SendCmd(cmd);
+                Dbg("paintto px=%.1f deg=%.2f target=%.1f", mp.x, angle * 57.29577951308232f, tgt);
                 SendCmd("SHAPE " + g_selected);
             }
         }
@@ -3282,7 +3404,9 @@ int main(int, char**) {
         }
         {
             static double lastShapeReq = 0.0;
-            if (!g_selected.empty() && g_bridge.Connected() && ImGui::GetTime() - lastShapeReq > 1.0) {
+            // 正在收轮廓时别再发（重发会把缓冲清掉重来，慢一点的机器永远收不满）
+            if (!g_selected.empty() && g_bridge.Connected() && g_pending_kind != 3 &&
+                ImGui::GetTime() - lastShapeReq > 1.0) {
                 lastShapeReq = ImGui::GetTime();
                 RequestShape();
             }
